@@ -4,14 +4,13 @@ import (
 	"encoding/json"
 	"fmt"
 	"net/http"
+	"os"
+	"os/exec"
+	"runtime"
 	"sync"
 	"time"
-)
 
-const (
-	endpoint          = "http://localhost:8003/group03/api/books"
-	startPointWorkers = 1
-	maxWorkers        = 100
+	"github.com/akamensky/argparse"
 )
 
 // returns time taken in milliseconds
@@ -44,7 +43,7 @@ type WorkerData struct {
 	connectedWorkers int
 }
 
-func worker(wg *sync.WaitGroup, workerData *WorkerData) {
+func worker(endpoint string, wg *sync.WaitGroup, workerData *WorkerData) {
 	client := &http.Client{}
 
 	defer wg.Done()
@@ -61,7 +60,7 @@ func worker(wg *sync.WaitGroup, workerData *WorkerData) {
 }
 
 // returns time taken in milliseconds and the number of workers that were connected
-func getAverageResponseTime(amountOfWorkers int) (int, int, error) {
+func getAverageResponseTime(endpoint string, amountOfWorkers int) (int, int, error) {
 	wg := sync.WaitGroup{}
 	workerData := WorkerData{
 		mutex:            sync.Mutex{},
@@ -71,7 +70,7 @@ func getAverageResponseTime(amountOfWorkers int) (int, int, error) {
 
 	for i := 0; i < amountOfWorkers; i++ {
 		wg.Add(1)
-		go worker(&wg, &workerData)
+		go worker(endpoint, &wg, &workerData)
 	}
 
 	wg.Wait()
@@ -91,6 +90,23 @@ func makeRange(min, max int) []int {
 	return a
 }
 
+func openBrowser(url string) error {
+	var cmd *exec.Cmd
+
+	switch runtime.GOOS {
+	case "linux":
+		cmd = exec.Command("xdg-open", url)
+	case "windows":
+		cmd = exec.Command("cmd", "/c", "start", url)
+	case "darwin":
+		cmd = exec.Command("open", url)
+	default:
+		return fmt.Errorf("unsupported platform")
+	}
+
+	return cmd.Start()
+}
+
 type Response struct {
 	XAxis         []int `json:"xAxis"`
 	ResponseTimes []int `json:"responseTimes"`
@@ -99,12 +115,27 @@ type Response struct {
 }
 
 func main() {
+	parser := argparse.NewParser("go-server-benchmark", "A simple benchmark to test the performance of a server. By automatically making requests and scaling up the amount of requests at once to the server and measuring the response time.")
+
+	endpoint := parser.String("e", "endpoint", &argparse.Options{Required: true, Help: "The endpoint to test."})
+	port := parser.Int("p", "port", &argparse.Options{Default: 8081, Help: "The port the webserver is running on."})
+	startPointWorkers := parser.Int("s", "start-workers", &argparse.Options{Default: 1, Help: "The amount of workers to start with."})
+	maxWorkers := parser.Int("m", "max-workers", &argparse.Options{Default: 100, Help: "The maximum amount of workers to test."})
+
+	err := parser.Parse(os.Args)
+	if err != nil {
+		fmt.Print(parser.Usage(err))
+		os.Exit(1)
+	}
+
 	failedConnections := make([]int, 0)
 	responseTimes := make([]int, 0)
 
+	doneMakingRequests := false
+
 	go func() {
-		for workers := startPointWorkers; workers <= maxWorkers; workers++ {
-			timeTaken, connectedWorkers, err := getAverageResponseTime(workers)
+		for workers := *startPointWorkers; workers <= *maxWorkers; workers++ {
+			timeTaken, connectedWorkers, err := getAverageResponseTime(*endpoint, workers)
 			if err != nil {
 				fmt.Println("Error in getAverageResponseTime:", err)
 			}
@@ -112,19 +143,21 @@ func main() {
 			failedConnections = append(failedConnections, workers-connectedWorkers)
 			responseTimes = append(responseTimes, timeTaken)
 		}
+		doneMakingRequests = true
 		fmt.Println("Done making requests.")
 	}()
 
-	fs := http.FileServer(http.Dir("public"))
-
-	http.Handle("/", fs)
+	http.HandleFunc("/", func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "text/html")
+		w.Write([]byte(getHtml()))
+	})
 
 	http.HandleFunc("/data", func(w http.ResponseWriter, r *http.Request) {
 		response := Response{
-			XAxis:         makeRange(startPointWorkers, maxWorkers),
+			XAxis:         makeRange(*startPointWorkers, *maxWorkers),
 			ResponseTimes: responseTimes,
 			Denied:        failedConnections,
-			Done:          len(responseTimes) == maxWorkers,
+			Done:          doneMakingRequests,
 		}
 
 		jsonResponse, err := json.Marshal(response)
@@ -136,6 +169,13 @@ func main() {
 		w.Write(jsonResponse)
 	})
 
-	fmt.Println("Server started on http://localhost:8081")
-	http.ListenAndServe(":8081", nil)
+	url := fmt.Sprintf("http://localhost:%d", *port)
+
+	fmt.Printf("Server started on %s\n", url)
+	fmt.Println("Opening browser...")
+	err = openBrowser(url)
+	if err != nil {
+		fmt.Println("Error opening browser:", err)
+	}
+	http.ListenAndServe(fmt.Sprintf(":%d", *port), nil)
 }
