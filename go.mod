@@ -1,4 +1,4 @@
-module go-server-benchmark
+module api-tester
 
 go 1.21.5
 
